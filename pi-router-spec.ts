@@ -8,9 +8,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
  *   think1 落地后（分支已有 assistant 消息）→ 完全不干预, pi 原始 payload 原样发出
  *
  * 判定完全由会话分支内容推导, 零状态机、零持久化；
- * 唯一注入是 recon 阶段向最后一条 user 消息追加一行风格提醒（贴近生成点, 与 system 风格块双保险）。
- * RECON_SYS 内含工具可用性声明：第一轮即提供 read + bash（bash 限定只读侦察命令）,
- * write/edit 等写工具第一轮思考后才添加, 故 recon 阶段不许改文件 —— 只读 + 规划, 写操作等工具到位再做。
+ * RECON_SYS 极简：只写一句 "You are a helpful software engineer assistant.", 其他一律不加；
+ * 工具照旧：第一轮只带 read + bash（bash 限定只读侦察命令）, 写工具不参与 recon 阶段。
  */
 
 // ---- §4.6 模型门控常量 ----
@@ -46,57 +45,13 @@ function extractTool(tools: unknown, toolName: string): Record<string, unknown> 
 	return undefined;
 }
 
-// ---- §4.4 RECON_SYS 模板（运行时拼接, 纯英文）----
-// 风格约束按用户要求重构, 三管齐下：
-//  1) 正向表达 + few-shot 示范（示范 > 禁令, 示范贴近 recon 场景）
-//  2) 风格块置于 system 末尾, 贴近 user 消息
-//  3) 强措辞（hard rule / forbidden / 纠错指令）盖过 "let me" 的 token 先验
-// 隐蔽指令（不得在 thinking 中泄露）按用户要求写入；
-// 保留架构必需指令：Working directory（read 相对路径）
-// 工具可用性声明（按用户要求追加）：
-//  第一轮即提供 read + bash（bash 限定只读侦察命令）；write/edit 等写工具第一轮思考后才加入,
-//  故 recon 阶段不许改文件 —— 只读 + 规划, 写操作等工具到位再做。
-function buildReconSys(ctx: ExtensionContext, reconToolNames: string[]): string {
-	const toolsLine =
-		reconToolNames.length === 1
-			? `- This first round exposes only the ${reconToolNames[0]} tool for reconnaissance.\n`
-			: `- This first round exposes these tools for reconnaissance: ${reconToolNames.join(", ")}.\n`;
-	return (
-		"You are a helpful assistant. Before acting, decide the task type. Think deeply first.\n" +
-		`Working directory: ${ctx.cwd}\n` +
-		"\n" +
-		"Reasoning style — hard rule, not a suggestion:\n" +
-		"- Every reasoning sentence must start with 'now' or 'we need'.\n" +
-		"- The phrase 'let me' is forbidden in your reasoning, in any form.\n" +
-		"- If you catch yourself writing 'let me', restart that sentence with 'now we need' instead.\n" +
-		"Examples of the required style:\n" +
-		"- now we need to identify the task type before acting\n" +
-		"- we need to inspect the working directory first\n" +
-		"- now we need to read the spec file before deciding\n" +
-		"\n" +
-		"Tool availability — hard rule:\n" +
-		toolsLine +
-		"- Use bash only for inspection commands (ls, grep, find, git status/log, etc.), never to modify files.\n" +
-		"- More tools (write, edit, etc.) are added after the first thinking round.\n" +
-		"- Do not write or modify any files in this round: plan only, write code after the tools arrive.\n"
-	);
+// ---- §4.4 RECON_SYS 模板（极简）----
+// 按用户要求：system 只写一句 "You are a helpful software engineer assistant."，其他一律不加。
+// 保留原签名（ctx / reconToolNames）仅为调用方不变；cwd、风格、工具可用性声明一律不写入。
+function buildReconSys(_ctx: ExtensionContext, _reconToolNames: string[]): string {
+	return "You are a helpful software engineer assistant.";
 }
 
-// ---- §4.3 风格第二重强化（拼入最后一条 user 消息, 贴近生成点）----
-// recon 阶段仅含 user 消息；在末尾追加一行正向风格提醒, 与 system 内的风格块形成双保险
-const STYLE_HINT =
-	"\n\n(Reasoning style: start every reasoning sentence with 'now' or 'we need'; never write 'let me'.)";
-
-function appendStyleHint(messages: Array<Record<string, unknown>>): void {
-	const last = messages[messages.length - 1];
-	if (!last) return;
-	const content = last.content;
-	if (typeof content === "string") {
-		last.content = content + STYLE_HINT;
-	} else if (Array.isArray(content)) {
-		(content as unknown[]).push({ type: "text", text: STYLE_HINT.trim() });
-	}
-}
 
 // ---- §4.3 payload 重写 ----
 function rewriteForRecon(
@@ -105,7 +60,7 @@ function rewriteForRecon(
 	reconTools: Array<Record<string, unknown>>,
 ): Record<string, unknown> {
 	const recon = { ...payload };
-	
+
 	// 1) tools：只留 read（+ bash, 若 pi 提供了）——原样复用 pi 生成的条目, 形状/描述/参数 100% 一致
 	recon.tools = reconTools;
 
@@ -117,8 +72,6 @@ function rewriteForRecon(
 	// 3) messages：只保留 user 消息；若原形态是 system 在 messages[0]（OpenAI chat/completions）, 补回 system 头
 	if (Array.isArray(recon.messages)) {
 		const userMessages = (recon.messages as Array<Record<string, unknown>>).filter((m) => m.role === "user");
-		// 3.1) 风格第二重强化：最后一条 user 消息末尾追加一行风格提醒（贴近生成点）
-		appendStyleHint(userMessages);
 		if (typeof recon.system !== "string") {
 			userMessages.unshift({ role: "system", content: reconSys });
 		}
