@@ -9,6 +9,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
  *
  * 判定完全由会话分支内容推导, 零状态机、零持久化；
  * 唯一注入是 recon 阶段向最后一条 user 消息追加一行风格提醒（贴近生成点, 与 system 风格块双保险）。
+ * RECON_SYS 内含工具可用性声明：第一轮思考后才会添加更多 tools（write/edit/bash 等）,
+ * 故 recon 阶段思考中不许写代码 —— 只读 + 规划, 代码等工具到位再写。
  */
 
 // ---- §4.6 模型门控常量 ----
@@ -51,6 +53,9 @@ function extractReadTool(tools: unknown): Record<string, unknown> | undefined {
 //  3) 强措辞（hard rule / forbidden / 纠错指令）盖过 "let me" 的 token 先验
 // 隐蔽指令（不得在 thinking 中泄露）按用户要求写入；
 // 保留架构必需指令：Working directory（read 相对路径）
+// 工具可用性声明（按用户要求追加）：
+//  第一轮思考后才会加入更多 tools（write/edit/bash 等）, 故 recon 阶段思考中不许写代码；
+//  只读 + 规划, 代码等工具到位再写。
 function buildReconSys(ctx: ExtensionContext): string {
 	return (
 		"You are a helpful assistant. Before acting, decide the task type. Think deeply first.\n" +
@@ -63,7 +68,12 @@ function buildReconSys(ctx: ExtensionContext): string {
 		"Examples of the required style:\n" +
 		"- now we need to identify the task type before acting\n" +
 		"- we need to inspect the working directory first\n" +
-		"- now we need to read the spec file before deciding\n"
+		"- now we need to read the spec file before deciding\n" +
+		"\n" +
+		"Tool availability — hard rule:\n" +
+		"- This first round exposes only the read tool for reconnaissance.\n" +
+		"- More tools (write, edit, bash, etc.) are added after the first thinking round.\n" +
+		"- Do not write any code in your reasoning now: coding tools are not available yet, plan only.\n"
 	);
 }
 
