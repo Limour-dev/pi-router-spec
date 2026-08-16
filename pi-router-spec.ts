@@ -1,16 +1,16 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 /**
- * pi-router-spec —— 首轮 Read-Only 侦察 → 全量续跑
+ * pi-router-spec —— 首轮 Recon 侦察（read + bash）→ 全量续跑
  *
  * 在 provider payload 层重构首轮请求：
- *   首轮（分支无 assistant 消息）→ [极简 RECON_SYS, 仅 read 工具, 仅 user 消息]
+ *   首轮（分支无 assistant 消息）→ [极简 RECON_SYS, 仅 read/bash 工具, 仅 user 消息]
  *   think1 落地后（分支已有 assistant 消息）→ 完全不干预, pi 原始 payload 原样发出
  *
  * 判定完全由会话分支内容推导, 零状态机、零持久化；
  * 唯一注入是 recon 阶段向最后一条 user 消息追加一行风格提醒（贴近生成点, 与 system 风格块双保险）。
- * RECON_SYS 内含工具可用性声明：第一轮思考后才会添加更多 tools（write/edit/bash 等）,
- * 故 recon 阶段思考中不许写代码 —— 只读 + 规划, 代码等工具到位再写。
+ * RECON_SYS 内含工具可用性声明：第一轮即提供 read + bash（bash 限定只读侦察命令）,
+ * write/edit 等写工具第一轮思考后才添加, 故 recon 阶段不许改文件 —— 只读 + 规划, 写操作等工具到位再做。
  */
 
 // ---- §4.6 模型门控常量 ----
@@ -22,24 +22,24 @@ const TARGET_MODEL_IDS: string[] = ["deepseek-v4-pro", "deepseek-v4-flash"];
 const MODEL_GATE_ENABLED = TARGET_MODEL_IDS.length > 0;
 const TARGET_MODEL_RES: RegExp[] = TARGET_MODEL_IDS.map((pattern) => new RegExp(pattern, "i"));
 
-// ---- §4.3 read 工具条目提取（复用 pi 自己生成的 schema, 不手写）----
-// 从 pi 构建好的 provider payload 中按 name 找到内置 read 工具条目, 原样复用：
-// - OpenAI 风格: { type: "function", function: { name: "read", description, parameters } }
-// - Anthropic 风格: { name: "read", description, input_schema }
-// 找不到 read（pi 未启用 read / 非 agent 请求）→ 返回 undefined, 调用方放弃重构：
-// pi 没带任何 read, 本插件也绝不自造一个 pi 执行不了的工具。
-function extractReadTool(tools: unknown): Record<string, unknown> | undefined {
+// ---- §4.3 工具条目提取（复用 pi 自己生成的 schema, 不手写）----
+// 从 pi 构建好的 provider payload 中按 name 找到内置工具条目（read / bash）, 原样复用：
+// - OpenAI 风格: { type: "function", function: { name, description, parameters } }
+// - Anthropic 风格: { name, description, input_schema }
+// 找不到目标工具（pi 未启用 / 非 agent 请求）→ 返回 undefined, 调用方放弃重构：
+// pi 没带某工具, 本插件也绝不自造一个 pi 执行不了的工具。
+function extractTool(tools: unknown, toolName: string): Record<string, unknown> | undefined {
 	if (!Array.isArray(tools)) return undefined;
 	for (const tool of tools) {
 		if (typeof tool !== "object" || tool === null) continue;
 		const entry = tool as Record<string, unknown>;
-		// OpenAI 风格: function.name === "read"
+		// OpenAI 风格: function.name === toolName
 		const fn = entry.function;
-		if (typeof fn === "object" && fn !== null && (fn as Record<string, unknown>).name === "read") {
+		if (typeof fn === "object" && fn !== null && (fn as Record<string, unknown>).name === toolName) {
 			return entry;
 		}
-		// Anthropic 风格: name === "read" 且带 input_schema
-		if (entry.name === "read" && entry.input_schema && typeof entry.input_schema === "object") {
+		// Anthropic 风格: name === toolName 且带 input_schema
+		if (entry.name === toolName && entry.input_schema && typeof entry.input_schema === "object") {
 			return entry;
 		}
 	}
@@ -54,9 +54,13 @@ function extractReadTool(tools: unknown): Record<string, unknown> | undefined {
 // 隐蔽指令（不得在 thinking 中泄露）按用户要求写入；
 // 保留架构必需指令：Working directory（read 相对路径）
 // 工具可用性声明（按用户要求追加）：
-//  第一轮思考后才会加入更多 tools（write/edit/bash 等）, 故 recon 阶段思考中不许写代码；
-//  只读 + 规划, 代码等工具到位再写。
-function buildReconSys(ctx: ExtensionContext): string {
+//  第一轮即提供 read + bash（bash 限定只读侦察命令）；write/edit 等写工具第一轮思考后才加入,
+//  故 recon 阶段不许改文件 —— 只读 + 规划, 写操作等工具到位再做。
+function buildReconSys(ctx: ExtensionContext, reconToolNames: string[]): string {
+	const toolsLine =
+		reconToolNames.length === 1
+			? `- This first round exposes only the ${reconToolNames[0]} tool for reconnaissance.\n`
+			: `- This first round exposes these tools for reconnaissance: ${reconToolNames.join(", ")}.\n`;
 	return (
 		"You are a helpful assistant. Before acting, decide the task type. Think deeply first.\n" +
 		`Working directory: ${ctx.cwd}\n` +
@@ -71,9 +75,10 @@ function buildReconSys(ctx: ExtensionContext): string {
 		"- now we need to read the spec file before deciding\n" +
 		"\n" +
 		"Tool availability — hard rule:\n" +
-		"- This first round exposes only the read tool for reconnaissance.\n" +
-		"- More tools (write, edit, bash, etc.) are added after the first thinking round.\n" +
-		"- Do not write any code in your reasoning now: coding tools are not available yet, plan only.\n"
+		toolsLine +
+		"- Use bash only for inspection commands (ls, grep, find, git status/log, etc.), never to modify files.\n" +
+		"- More tools (write, edit, etc.) are added after the first thinking round.\n" +
+		"- Do not write or modify any files in this round: plan only, write code after the tools arrive.\n"
 	);
 }
 
@@ -94,11 +99,15 @@ function appendStyleHint(messages: Array<Record<string, unknown>>): void {
 }
 
 // ---- §4.3 payload 重写 ----
-function rewriteForRecon(payload: Record<string, unknown>, reconSys: string, readTool: Record<string, unknown>): Record<string, unknown> {
+function rewriteForRecon(
+	payload: Record<string, unknown>,
+	reconSys: string,
+	reconTools: Array<Record<string, unknown>>,
+): Record<string, unknown> {
 	const recon = { ...payload };
-
-	// 1) tools：只留 read（原样复用 pi 生成的条目, 形状/描述/参数 100% 一致）
-	recon.tools = [readTool];
+	
+	// 1) tools：只留 read（+ bash, 若 pi 提供了）——原样复用 pi 生成的条目, 形状/描述/参数 100% 一致
+	recon.tools = reconTools;
 
 	// 2) system：整体替换（独立 system 字段：Anthropic / OpenAI Responses 风格）
 	if (typeof recon.system === "string" || recon.system !== undefined) {
@@ -169,15 +178,20 @@ export default function piRouterSpec(pi: ExtensionAPI): void {
 
 		// 判定 4：tools 里有 read（pi 生成的内置条目）才重构；没有 read 则不重构：
 		// pi 都没给 read, recon 阶段也不该带任何工具（绝不自造 pi 执行不了的工具）
-		const readTool = extractReadTool(body.tools);
+		const readTool = extractTool(body.tools, "read");
 		if (!readTool) {
 			reconActive = false;
 			return undefined;
 		}
-
+		// bash 是加分项：pi 提供了就一并带上（recon 阶段可用 ls/grep/find 等只读侦察）；
+		// pi 没提供 bash 则退回仅 read, 照样重构
+		const bashTool = extractTool(body.tools, "bash");
+		const reconTools = bashTool ? [readTool, bashTool] : [readTool];
+		const reconToolNames = bashTool ? ["read", "bash"] : ["read"];
+		
 		// 判定 5：以上均通过 → 重构
-		const reconSys = buildReconSys(ctx);
-		const rewritten = rewriteForRecon(body, reconSys, readTool);
+		const reconSys = buildReconSys(ctx, reconToolNames);
+		const rewritten = rewriteForRecon(body, reconSys, reconTools);
 		if (rewritten === body) {
 			reconActive = false;
 			return undefined;
@@ -186,6 +200,7 @@ export default function piRouterSpec(pi: ExtensionAPI): void {
 		console.log("[pi-router-spec] recon request", {
 			model: currentModelId(ctx) ?? "unknown",
 			toolCount: body.tools.length,
+			reconTools: reconToolNames,
 			messageRoles: Array.isArray(body.messages)
 				? (body.messages as Array<Record<string, unknown>>).map((m) => m.role)
 				: undefined,
@@ -193,10 +208,10 @@ export default function piRouterSpec(pi: ExtensionAPI): void {
 		return rewritten;
 	});
 
-	// §4.5 tool_call 双保险：reconActive 期间只放行 read（payload 层已过滤, 正常不会触发）
+	// §4.5 tool_call 双保险：reconActive 期间只放行 read / bash（payload 层已过滤, 正常不会触发）
 	pi.on("tool_call", async (event, _ctx) => {
-		if (reconActive && event.toolName !== "read") {
-			return { block: true, reason: "recon phase: only read allowed" };
+		if (reconActive && event.toolName !== "read" && event.toolName !== "bash") {
+			return { block: true, reason: "recon phase: only read/bash allowed" };
 		}
 		return undefined;
 	});
