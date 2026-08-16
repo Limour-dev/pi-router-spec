@@ -1,0 +1,21 @@
+{
+  "name": "pi-router-spec",
+  "version": "1.0.0",
+  "description": "pi extension: first-turn read-only recon, then full continuation",
+  "type": "module",
+  "license": "GPL-3.0",
+  "keywords": ["pi-package", "pi-extension", "recon"],
+  "files": ["pi-router-spec.ts", "README.md", "LICENSE", "PRD.md"],
+  "scripts": {
+    "typecheck": "tsc --noEmit --strict --target es2022 --module esnext --moduleResolution bundler --types \"\" pi-router-spec.ts"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "pi": {
+    "extensions": ["./pi-router-spec.ts"]
+  }
+}
