@@ -2,6 +2,8 @@
 
 pi 扩展：**首轮 Read-Only 侦察 → 全量续跑**。
 
+交流讨论：<https://linux.do/>
+
 在 provider payload 层（`before_provider_request`）重构首轮请求：
 
 - 首轮（分支中不存在任何 `role === "assistant"` 的消息）→ 发送 `[极简 RECON_SYS, 仅 read 工具, 仅 user 消息]`
@@ -16,27 +18,16 @@ pi 扩展：**首轮 Read-Only 侦察 → 全量续跑**。
 - `PRD.md` —— 需求与验收标准（§7 共 11 条）
 
 ## 安装
-
-本仓库是标准 pi package（`package.json` 的 `pi` manifest + `pi-package` keyword），可通过 `pi install` 从本地路径、git 或 npm 安装：
+本仓库是标准 pi package（`package.json` 的 `pi` manifest + `pi-package` keyword），可通过 `pi install` 从 git 安装：
 
 ```bash
-# 本地路径（不复制，settings 直接引用）
-pi install /home/limour/pi-router-spec
-
-# git 分发（发布到 git 仓库后）
-pi install git:github.com/<user>/pi-router-spec
-
-# npm 分发（发布到 npm 后）
-pi install npm:pi-router-spec
-
-# 不安装、临时试用（当前 run 有效）
-pi -e /home/limour/pi-router-spec
+pi install git:github.com/Limour-dev/pi-router-spec
 ```
 
 默认写入用户级 settings（`~/.pi/agent/settings.json`）；加 `-l` 写入项目级 settings（`.pi/settings.json`，可随仓库共享）：
 
 ```bash
-pi install -l /home/limour/pi-router-spec
+pi install -l git:github.com/Limour-dev/pi-router-spec
 ```
 
 安装后在 pi 内 `/reload` 生效。
@@ -44,7 +35,6 @@ pi install -l /home/limour/pi-router-spec
 ### 仅引用单文件（开发迭代，不经 pi install）
 
 在 `~/.pi/settings.json` 中加一行（仅引用本仓库文件，不复制）：
-
 ```json
 { "extensions": ["/home/limour/pi-router-spec/pi-router-spec.ts"] }
 ```
