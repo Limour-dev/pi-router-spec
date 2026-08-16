@@ -7,7 +7,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
  *   首轮（分支无 assistant 消息）→ [极简 RECON_SYS, 仅 read 工具, 仅 user 消息]
  *   think1 落地后（分支已有 assistant 消息）→ 完全不干预, pi 原始 payload 原样发出
  *
- * 判定完全由会话分支内容推导, 零状态机、零消息注入、零持久化。
+ * 判定完全由会话分支内容推导, 零状态机、零持久化；
+ * 唯一注入是 recon 阶段向最后一条 user 消息追加一行风格提醒（贴近生成点, 与 system 风格块双保险）。
  */
 
 // ---- §4.6 模型门控常量 ----
@@ -44,13 +45,42 @@ function extractReadTool(tools: unknown): Record<string, unknown> | undefined {
 }
 
 // ---- §4.4 RECON_SYS 模板（运行时拼接, 纯英文）----
-// 风格约束（thinking 里用 now/we need, 禁 let me）与隐蔽指令（不得在 thinking 中泄露）按用户要求写入；
-// 保留三行架构必需指令：Working directory（read 相对路径）/ Do NOT give your final answer yet（防回合提前结束）/ End with read calls（引导 think1 收尾）
+// 风格约束按用户要求重构, 三管齐下：
+//  1) 正向表达 + few-shot 示范（示范 > 禁令, 示范贴近 recon 场景）
+//  2) 风格块置于 system 末尾, 贴近 user 消息
+//  3) 强措辞（hard rule / forbidden / 纠错指令）盖过 "let me" 的 token 先验
+// 隐蔽指令（不得在 thinking 中泄露）按用户要求写入；
+// 保留架构必需指令：Working directory（read 相对路径）
 function buildReconSys(ctx: ExtensionContext): string {
 	return (
-		"You are a helpful assistant. Before acting, decide the task type. Think deeply first, using 'now' and 'we need' when thinking — never 'let me'.\n" +
-		`Working directory: ${ctx.cwd}` 
+		"You are a helpful assistant. Before acting, decide the task type. Think deeply first.\n" +
+		`Working directory: ${ctx.cwd}\n` +
+		"\n" +
+		"Reasoning style — hard rule, not a suggestion:\n" +
+		"- Every reasoning sentence must start with 'now' or 'we need'.\n" +
+		"- The phrase 'let me' is forbidden in your reasoning, in any form.\n" +
+		"- If you catch yourself writing 'let me', restart that sentence with 'now we need' instead.\n" +
+		"Examples of the required style:\n" +
+		"- now we need to identify the task type before acting\n" +
+		"- we need to inspect the working directory first\n" +
+		"- now we need to read the spec file before deciding\n"
 	);
+}
+
+// ---- §4.3 风格第二重强化（拼入最后一条 user 消息, 贴近生成点）----
+// recon 阶段仅含 user 消息；在末尾追加一行正向风格提醒, 与 system 内的风格块形成双保险
+const STYLE_HINT =
+	"\n\n(Reasoning style: start every reasoning sentence with 'now' or 'we need'; never write 'let me'.)";
+
+function appendStyleHint(messages: Array<Record<string, unknown>>): void {
+	const last = messages[messages.length - 1];
+	if (!last) return;
+	const content = last.content;
+	if (typeof content === "string") {
+		last.content = content + STYLE_HINT;
+	} else if (Array.isArray(content)) {
+		(content as unknown[]).push({ type: "text", text: STYLE_HINT.trim() });
+	}
 }
 
 // ---- §4.3 payload 重写 ----
@@ -68,6 +98,8 @@ function rewriteForRecon(payload: Record<string, unknown>, reconSys: string, rea
 	// 3) messages：只保留 user 消息；若原形态是 system 在 messages[0]（OpenAI chat/completions）, 补回 system 头
 	if (Array.isArray(recon.messages)) {
 		const userMessages = (recon.messages as Array<Record<string, unknown>>).filter((m) => m.role === "user");
+		// 3.1) 风格第二重强化：最后一条 user 消息末尾追加一行风格提醒（贴近生成点）
+		appendStyleHint(userMessages);
 		if (typeof recon.system !== "string") {
 			userMessages.unshift({ role: "system", content: reconSys });
 		}
